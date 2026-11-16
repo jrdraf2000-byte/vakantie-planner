@@ -1,0 +1,7 @@
+{
+  "appId": "nl.jrdraf.vakantieplanner",
+  "appName": "Vakantieplanner",
+  "webDir": "www",
+  "server": { "androidScheme": "https" },
+  "android": { "backgroundColor": "#f5efe6" }
+}

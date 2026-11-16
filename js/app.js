@@ -1,4 +1,4 @@
-import { CATS, catOf, geocode, overpassSearch, filterByText, wikiSummary, destinationIntro, googleSearch, googleReviews } from "./api.js";
+import { CATS, catOf, geocode, overpassSearch, cachedSearch, prefetch, filterByText, wikiSummary, destinationIntro, googleSearch, googleReviews } from "./api.js";
 
 const TINTS = ["#fde2d6", "#d8eef0", "#fff0c8", "#e2ecdc", "#ece2f3", "#dbe6f6"];
 const EMO = ["🌴", "🏙️", "🏝️", "⛰️", "🕌", "🗼", "🌅", "🏖️"];
@@ -81,7 +81,9 @@ async function search() {
   const d = dest(); if (!d) return;
   const c = catOf(ui.cat);
   const halal = ui.halal && c.food;
-  ui.loading = true; ui.err = ""; ui.results = []; ui.shown = PAGE; render();
+  ui.err = ""; ui.shown = PAGE;
+  const hit = ui.src === "osm" && cachedSearch(d, ui.cat, { halal });
+  if (!hit) { ui.loading = true; ui.results = []; render(); }
   try {
     if (ui.src === "google") {
       ui.raw = await googleSearch(state.settings.gkey, d, ui.cat, { halal, query: ui.query });
@@ -99,7 +101,9 @@ async function search() {
     ui.err = ui.src === "google" ? (e.message || "Google-zoekopdracht mislukt.") : "De kaartdienst reageert niet (druk of geen internet). Probeer het zo opnieuw.";
   }
   ui.loading = false; render(); enrich();
+  if (ui.src === "osm" && !prefetched.has(d.id)) { prefetched.add(d.id); setTimeout(() => prefetch(d, ["restaurants", "cafes", "malls", "museums", "outlets"]), 600); }
 }
+const prefetched = new Set();
 async function enrich() {
   if (ui.src !== "osm") return;
   const vis = ui.results.slice(0, ui.shown).filter(p => (p.wikidata || p.wikipedia) && !(p._id in wiki));
@@ -150,7 +154,18 @@ function addItem(p) {
   t.items.push({ id: uid(), place: slimPlace(p), day: "", time: "", done: false, note: "", added: Date.now() });
   save(); toast("✓ Toegevoegd aan to-do's"); render();
 }
-function exportData() {
+const Native = window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform() ? window.Capacitor.Plugins : null;
+
+async function exportData() {
+  const json = JSON.stringify(state, null, 1);
+  const name = "vakantieplanner-backup-" + new Date().toISOString().slice(0, 10) + ".json";
+  if (Native && Native.Filesystem && Native.Share) {
+    try {
+      const f = await Native.Filesystem.writeFile({ path: name, data: json, directory: "CACHE", encoding: "utf8" });
+      await Native.Share.share({ title: "Vakantieplanner back-up", url: f.uri, dialogTitle: "Back-up bewaren of delen" });
+    } catch (e) { if (!/cancel/i.test(e && e.message || "")) toast("Back-up maken mislukt"); }
+    return;
+  }
   const blob = new Blob([JSON.stringify(state, null, 1)], { type: "application/json" });
   const a = document.createElement("a"); a.href = URL.createObjectURL(blob);
   a.download = "vakantieplanner-backup-" + new Date().toISOString().slice(0, 10) + ".json";
@@ -453,4 +468,13 @@ function act(a, el) {
 }
 
 load(); render();
-if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+if (Native) {
+  try { Native.StatusBar && Native.StatusBar.setBackgroundColor({ color: "#0f4c5c" }); Native.StatusBar && Native.StatusBar.setStyle({ style: "DARK" }); } catch (e) {}
+  try {
+    Native.App && Native.App.addListener("backButton", () => {
+      if (ui.modal) { ui.modal = null; render(); }
+      else if (ui.view !== "home") act("home");
+      else Native.App.exitApp();
+    });
+  } catch (e) {}
+} else if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
