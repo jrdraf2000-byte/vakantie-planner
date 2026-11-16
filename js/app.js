@@ -1,4 +1,4 @@
-import { CATS, catOf, geocode, overpassSearch, cachedSearch, prefetch, filterByText, wikiSummary, destinationIntro, googleSearch, googleReviews } from "./api.js";
+import { CATS, catOf, geocode, overpassSearch, cachedSearch, prefetch, autoRadius, filterByText, wikiSummary, destinationIntro, googleSearch, googleReviews } from "./api.js";
 
 const TINTS = ["#fde2d6", "#d8eef0", "#fff0c8", "#e2ecdc", "#ece2f3", "#dbe6f6"];
 const EMO = ["🌴", "🏙️", "🏝️", "⛰️", "🕌", "🗼", "🌅", "🏖️"];
@@ -76,9 +76,21 @@ async function drawMap(el, pts, center) {
   else map.setView([center.lat, center.lon], 12);
 }
 
+/* ---------- zoekgebied ---------- */
+const RADII = [0, 500, 1000, 2000, 5000, 10000, 25000, 50000];
+const rTxt = m => m >= 1000 ? (m / 1000) + " km" : m + " m";
+function where(d) {
+  const c = d.center; // eigen middelpunt (hotel/adres) of null = centrum
+  const w = { ...d, lat: c ? c.lat : d.lat, lon: c ? c.lon : d.lon, bbox: c ? null : d.bbox };
+  if (d.radius) w.fixedRadius = d.radius;
+  else if (c) w.fixedRadius = autoRadius(ui.cat, ui.halal && catOf(ui.cat).food);
+  return w;
+}
+
 /* ---------- zoeken ---------- */
 async function search() {
-  const d = dest(); if (!d) return;
+  const d0 = dest(); if (!d0) return;
+  const d = where(d0);
   const c = catOf(ui.cat);
   const halal = ui.halal && c.food;
   ui.err = ""; ui.shown = PAGE;
@@ -101,7 +113,8 @@ async function search() {
     ui.err = ui.src === "google" ? (e.message || "Google-zoekopdracht mislukt.") : "De kaartdienst reageert niet (druk of geen internet). Probeer het zo opnieuw.";
   }
   ui.loading = false; render(); enrich();
-  if (ui.src === "osm" && !prefetched.has(d.id)) { prefetched.add(d.id); setTimeout(() => prefetch(d, ["restaurants", "cafes", "malls", "museums", "outlets"]), 600); }
+  const pk = d.id + d.lat + d.lon + (d0.radius || "");
+  if (ui.src === "osm" && !d0.center && !d0.radius && !prefetched.has(pk)) { prefetched.add(pk); setTimeout(() => prefetch(d, ["restaurants", "cafes", "malls", "museums", "outlets"]), 600); }
 }
 const prefetched = new Set();
 async function enrich() {
@@ -192,7 +205,7 @@ function render() {
   bind();
   window.scrollTo(0, sy);
   if (ui.view === "dest" && ui.tab === "discover" && ui.mode === "map" && ui.results.length) {
-    const el = $("#map"); if (el) drawMap(el, ui.results.slice(0, ui.shown), dest()).catch(() => { el.innerHTML = '<div class="empty">Kaart kon niet laden.</div>'; });
+    const el = $("#map"); if (el) drawMap(el, ui.results.slice(0, ui.shown), where(dest())).catch(() => { el.innerHTML = '<div class="empty">Kaart kon niet laden.</div>'; });
   }
   if (ui.dayMap) { const el = document.getElementById("daymap_" + ui.dayMap); const t = trip(); if (el && t) drawMap(el, sortedDay(t, ui.dayMap).map(i => ({ ...i.place, time: i.time })), dest()).catch(() => {}); }
 }
@@ -256,6 +269,12 @@ function discoverView(d) {
   <div class="card">
     <div class="row"><input id="q" type="text" class="grow" placeholder="${c.food ? "bv. turks, pizza, ontbijt…" : "Filter (optioneel)…"}" value="${esc(ui.query)}"><button class="btn" data-a="search">Zoek</button></div>
     ${c.food ? `<div class="toggle" data-a="halal" style="margin-top:8px;cursor:pointer"><div class="sw ${ui.halal ? "on" : ""}"></div> Alleen halal</div>` : ""}
+    <div class="row" style="margin-top:10px;gap:8px">
+      <div class="grow" style="min-width:0"><label class="small" style="display:block;margin-bottom:3px">📍 Zoek rond</label>
+        <select id="centerSel" style="padding:8px 9px;font-size:13.5px"><option value="">Centrum van ${esc(d.name)}</option>${d.center ? `<option value="cur" selected>${esc(d.center.name)}</option>` : ""}<option value="new">Ander adres of hotel…</option></select></div>
+      <div style="width:118px;flex:none"><label class="small" style="display:block;margin-bottom:3px">↔ Afstand</label>
+        <select id="radiusSel" style="padding:8px 9px;font-size:13.5px">${RADII.map(m => `<option value="${m}" ${(d.radius || 0) === m ? "selected" : ""}>${m ? rTxt(m) : "Automatisch"}</option>`).join("")}</select></div>
+    </div>
     <div class="srcbar">
       <div class="seg"><button class="${ui.mode === "list" ? "on" : ""}" data-a="mode" data-k="list">☰ Lijst</button><button class="${ui.mode === "map" ? "on" : ""}" data-a="mode" data-k="map">🗺 Kaart</button></div>
       <div class="grow"></div>
@@ -277,7 +296,7 @@ function placeCard(p, d, added) {
   return `<div class="card place" id="card_${p._id}">
     ${img ? `<img class="thumb" src="${esc(img)}" alt="" loading="lazy" onerror="this.remove()">` : ""}
     <h3>${esc(p.name)}</h3>
-    <div class="meta">${c.e} ${esc(kind)}${p.area ? " · " + esc(p.area) : ""}${p.km != null ? " · " + kmTxt(p.km) + " van centrum" : ""}</div>
+    <div class="meta">${c.e} ${esc(kind)}${p.area ? " · " + esc(p.area) : ""}${p.km != null ? " · " + kmTxt(p.km) + (dest().center ? " van " + esc(dest().center.name) : " van centrum") : ""}</div>
     <div class="badges">
       ${p.rating ? `<span class="b star">★ ${p.rating.toFixed(1)}${p.reviewCount ? " · " + p.reviewCount.toLocaleString("nl-NL") + " reviews" : ""}</span>` : ""}
       ${p.priceLevel ? `<span class="b">${esc(p.priceLevel)}</span>` : ""}
@@ -390,6 +409,12 @@ function modalView() {
       <div class="links" style="margin-bottom:14px"><a href="${gmaps(i.place, dest().name)}" target="_blank" rel="noopener">📍 Route & reviews</a>${i.place.website ? `<a href="${esc(i.place.website)}" target="_blank" rel="noopener">🌐 Website</a>` : ""}</div>
       <div class="row"><button class="btn ghost" style="color:var(--red)" data-a="delItem">Verwijder</button><div class="grow"></div><button class="btn" data-a="saveItem">Opslaan</button></div>`);
   }
+  if (m.type === "center") return wrap(`<h2>Zoek rond een adres</h2>
+      <p class="small">Bijvoorbeeld je hotel, appartement of een wijk. De app zoekt dan plekken in de buurt daarvan.</p>
+      <div class="row"><input id="cQuery" type="text" class="grow" placeholder="bv. Hilton Bomonti of Taksim" autocomplete="off"><button class="btn" data-a="centerFind">Zoek</button></div>
+      ${ui.cLoading ? `<div class="loadbox" style="padding:14px"><span class="spin"></span></div>` : ""}
+      ${ui.cSugg ? (ui.cSugg.length ? `<div class="suggest">${ui.cSugg.map((g, i) => `<button data-a="centerPick" data-i="${i}"><b>${esc(g.name)}</b><small>${esc(g.label)}</small></button>`).join("")}</div>` : `<div class="small" style="margin-top:8px">Niets gevonden. Probeer het met de straat of wijk erbij.</div>`) : ""}
+      <div class="row" style="margin-top:14px"><button class="btn ghost grow" data-a="close">Annuleer</button></div>`);
   if (m.type === "custom") return wrap(`<h2>Eigen item toevoegen</h2>
       <div class="field"><label>Wat?</label><input id="cName" type="text" placeholder="bv. Boottocht met vrienden"></div>
       <div class="field"><label>Categorie</label><select id="cCat">${CATS.map(c => `<option value="${c.k}">${c.e} ${c.l}</option>`).join("")}</select></div>
@@ -404,6 +429,13 @@ function bind() {
   const nd = $("#newDest"); if (nd) nd.addEventListener("keydown", e => { if (e.key === "Enter") act("find"); });
   const q = $("#q"); if (q) { q.addEventListener("input", e => ui.query = e.target.value); q.addEventListener("keydown", e => { if (e.key === "Enter") act("search"); }); }
   const ts = $("#tripSel"); if (ts) ts.addEventListener("change", e => { ui.tripId = e.target.value; ui.dayMap = null; render(); });
+  const cs = $("#centerSel"); if (cs) cs.addEventListener("change", e => {
+    const d = dest();
+    if (e.target.value === "new") { ui.modal = { type: "center" }; ui.cSugg = null; render(); return; }
+    if (e.target.value === "") { d.center = null; save(); search(); }
+  });
+  const rs = $("#radiusSel"); if (rs) rs.addEventListener("change", e => { const d = dest(); d.radius = +e.target.value || 0; save(); search(); });
+  const ci = $("#cQuery"); if (ci) { ci.focus(); ci.addEventListener("keydown", e => { if (e.key === "Enter") act("centerFind"); }); }
   const f = $("#importFile"); if (f) f.addEventListener("change", e => { if (e.target.files[0]) importData(e.target.files[0]); });
   document.querySelectorAll("select[data-a=setday]").forEach(s => s.addEventListener("change", e => {
     const i = trip().items.find(x => x.id === s.dataset.id); i.day = e.target.value; save(); toast(i.day ? "Ingepland" : "Uit planning gehaald"); render();
@@ -463,6 +495,13 @@ function act(a, el) {
     case "delItem": t.items = t.items.filter(x => x.id !== ui.modal.id); ui.modal = null; save(); render(); break;
     case "addCustom": ui.modal = { type: "custom" }; render(); break;
     case "saveCustom": { const n = $("#cName").value.trim(); if (!n) return; t.items.push({ id: uid(), place: { _id: uid(), name: n, cat: $("#cCat").value }, day: "", time: "", done: false, note: "", added: Date.now() }); ui.modal = null; save(); render(); break; }
+    case "centerFind": {
+      const v = ($("#cQuery").value || "").trim(); if (!v) return;
+      ui.cLoading = true; ui.cSugg = null; render();
+      geocode(v + ", " + d.name, d).then(r => r.length ? r : geocode(v, d)).then(r => { ui.cSugg = r; }).catch(() => { ui.cSugg = []; toast("Zoeken mislukt — check je internet"); }).finally(() => { ui.cLoading = false; render(); const ci = $("#cQuery"); if (ci) ci.value = v; });
+      break;
+    }
+    case "centerPick": { const g = ui.cSugg[+el.dataset.i]; d.center = { name: g.name, lat: g.lat, lon: g.lon }; ui.modal = null; ui.cSugg = null; save(); search(); toast("Zoekt nu rond " + g.name); break; }
     case "close": case "closeBg": ui.modal = null; render(); break;
   }
 }
