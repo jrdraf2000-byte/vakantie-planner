@@ -22,6 +22,20 @@ Zonder Google-sleutel zie je dus geen sterren of reviews in de app zelf. Elke pl
 
 **Over halal:** in OpenStreetMap zijn veel halal zaken nog niet gelabeld. Krijg je weinig resultaten, gebruik dan de bron *Google ★*. Die zoekt op "halal restaurants in …". Of gebruik de knop *Halal check* bij een restaurant. Check bij twijfel altijd ter plekke of de zaak een certificaat heeft.
 
+## Android-app (APK)
+
+Bij elke wijziging bouwt GitHub automatisch een nieuwe Android-app. Je hoeft daar niets voor te doen.
+
+**Downloaden:** [vakantieplanner.apk](https://github.com/jrdraf2000-byte/vakantie-planner/releases/latest/download/vakantieplanner.apk) (open deze link op je Android-telefoon)
+
+1. Open de link en download het bestand.
+2. Tik op de download. Vraagt Android om toestemming voor *Onbekende apps installeren*? Zet dat aan voor je browser of Bestanden-app.
+3. Tik op **Installeren**. De app staat nu tussen je andere apps.
+
+**Bijwerken:** download de nieuwste APK met dezelfde link en installeer hem opnieuw. Je reizen blijven bewaard.
+
+> De app wordt ondertekend met de sleutel in `android-res/`. Dat is nodig om updates over de oude app heen te kunnen installeren. Voor een persoonlijke app die je zelf installeert is dat prima. Wil je hem ooit in de Play Store zetten, maak dan een nieuwe, geheime sleutel.
+
 ## Online zetten (GitHub Pages)
 
 1. Ga in deze repo naar **Settings → Pages**.
@@ -42,7 +56,7 @@ Je reizen worden op je telefoon bewaard. Maak via ⚙︎ af en toe een back-up.
 3. Zet bij **APIs & Services → Library** de volgende twee aan: **Maps JavaScript API** en **Places API (New)**.
 4. Maak bij **APIs & Services → Credentials** een **API key** aan.
 5. **Beperk de sleutel** (belangrijk!):
-   - *Application restrictions:* **Websites**, met `https://jrdraf2000-byte.github.io/*`
+   - *Application restrictions:* **Websites**, met `https://jrdraf2000-byte.github.io/*` en, voor de Android-app, ook `https://localhost/*`
    - *API restrictions:* alleen de twee API's hierboven
 6. Open de app, tik op ⚙︎, plak de sleutel en tik op **Opslaan**. Kies daarna bij Ontdekken de bron **Google ★**.
 
@@ -50,7 +64,7 @@ De sleutel wordt alleen op je eigen apparaat bewaard en staat niet in deze repo.
 
 ## Techniek
 
-Gewone HTML, CSS en JavaScript, zonder build-stap. Kaarten met [Leaflet](https://leafletjs.com) en OpenStreetMap-tegels. De app werkt ook offline: je to-do's en planning blijven zichtbaar, alleen zoeken heeft internet nodig.
+Gewone HTML, CSS en JavaScript, zonder build-stap. De Android-app is dezelfde code, verpakt met [Capacitor](https://capacitorjs.com) door `.github/workflows/android.yml`. Kaarten met [Leaflet](https://leafletjs.com) en OpenStreetMap-tegels. De app werkt ook offline: je to-do's en planning blijven zichtbaar, alleen zoeken heeft internet nodig. Zoekresultaten worden 3 dagen bewaard en populaire categorieën worden alvast op de achtergrond opgehaald, zodat wisselen tussen categorieën direct gaat.
 
 ```
 index.html            app-pagina

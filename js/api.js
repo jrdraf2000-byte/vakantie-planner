@@ -9,6 +9,7 @@ const OVERPASS = [
 async function getJSON(url, opts = {}, ms = 30000) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort(), ms);
+  if (opts.signal) opts.signal.addEventListener("abort", () => ctrl.abort());
   try {
     const r = await fetch(url, { ...opts, signal: ctrl.signal });
     if (!r.ok) throw new Error("HTTP " + r.status);
@@ -58,30 +59,73 @@ const Q = {
   nightlife: ['nwr["amenity"~"^(bar|pub|nightclub)$"]["name"]', 'nwr["tourism"="viewpoint"]["name"]']
 };
 
-function areaFilter(dest) {
+// Zoekstraal per categorie: klein genoeg om snel te zijn, groot genoeg voor genoeg keus.
+const RADIUS = { restaurants: 2500, cafes: 2500, nightlife: 4000, markets: 5000, malls: 9000, outlets: 25000, nature: 12000, activities: 12000, sights: 6000, museums: 6000 };
+function areaFilter(dest, catKey, halal) {
+  let r = RADIUS[catKey] || 6000;
+  if (halal) r *= 2.4; // minder treffers, dus breder zoeken
   const b = dest.bbox;
-  const big = !b || (b[1] - b[0]) > 0.45 || (b[3] - b[2]) > 0.45;
-  if (big) return `(around:${dest.radius || 12000},${dest.lat},${dest.lon})`;
-  return `(${b[0]},${b[2]},${b[1]},${b[3]})`;
+  if (b) { // kleine plek (dorp, wijk): niet verder zoeken dan nodig
+    const half = dist(b[0], b[2], b[1], b[3]) * 500;
+    if (half > 600) r = Math.min(r, Math.max(half, 1500));
+  }
+  return `(around:${Math.round(r)},${dest.lat},${dest.lon})`;
 }
 
 const DUTCH_CUISINE = { turks: "turkish", italiaans: "italian", libanees: "lebanese", marokkaans: "moroccan", indiaas: "indian", chinees: "chinese", japans: "japanese", grieks: "greek", spaans: "spanish", mexicaans: "mexican", thais: "thai", arabisch: "arab", pakistaans: "pakistani", vis: "seafood", burger: "burger", pizza: "pizza", sushi: "sushi", kebab: "kebab", ontbijt: "breakfast", vegetarisch: "vegetarian", steak: "steak", koreaans: "korean", perzisch: "persian", indonesisch: "indonesian", surinaams: "surinamese", frans: "french" };
 
-export async function overpassSearch(dest, catKey, { halal = false } = {}) {
+const CACHE_MS = 3 * 24 * 3600 * 1000;
+const inflight = new Map();
+const cacheKey = (dest, catKey, halal) => `ovp1:${dest.lat.toFixed(3)},${dest.lon.toFixed(3)}:${catKey}:${halal ? 1 : 0}`;
+
+export function cachedSearch(dest, catKey, { halal = false } = {}) {
+  try {
+    const j = JSON.parse(localStorage.getItem(cacheKey(dest, catKey, halal && catOf(catKey).food)) || "null");
+    if (j && Date.now() - j.t < CACHE_MS) return j.v;
+  } catch (e) {}
+  return null;
+}
+
+export async function overpassSearch(dest, catKey, { halal = false, fresh = false } = {}) {
+  halal = halal && catOf(catKey).food;
+  const key = cacheKey(dest, catKey, halal);
+  if (!fresh) { const c = cachedSearch(dest, catKey, { halal }); if (c) return c; }
+  if (inflight.has(key)) return inflight.get(key);
   let parts = Q[catKey] || Q.sights;
-  if (halal && catOf(catKey).food) {
-    parts = parts.flatMap(p => [p + '["diet:halal"~"^(yes|only)$"]', p + '["name"~"halal",i]', p + '["cuisine"~"halal",i]']);
+  if (halal) parts = parts.flatMap(p => [p + '["diet:halal"~"^(yes|only)$"]', p + '["name"~"halal",i]', p + '["cuisine"~"halal",i]']);
+  const area = areaFilter(dest, catKey, halal);
+  const body = "data=" + encodeURIComponent(`[out:json][timeout:20];(${parts.map(p => p + area + ";").join("")});out center tags qt 250;`);
+  // Alle servers tegelijk proberen: de snelste wint, de rest wordt afgebroken.
+  const ctrls = OVERPASS.map(() => new AbortController());
+  const p = Promise.any(OVERPASS.map((ep, i) => getJSON(ep, { method: "POST", body, signal: ctrls[i].signal, headers: { "Content-Type": "application/x-www-form-urlencoded" } }, 25000)
+    .then(res => { if (!res || !res.elements) throw new Error("leeg"); return [i, res]; })))
+    .then(([win, res]) => {
+      ctrls.forEach((c, i) => i !== win && c.abort());
+      const v = normalizeOSM(res.elements, dest, catKey).slice(0, 120);
+      try { localStorage.setItem(key, JSON.stringify({ t: Date.now(), v })); } catch (e) { pruneCache(); }
+      return v;
+    })
+    .catch(() => { throw new Error("Overpass niet bereikbaar"); })
+    .finally(() => inflight.delete(key));
+  inflight.set(key, p);
+  return p;
+}
+
+function pruneCache() {
+  try {
+    const ks = Object.keys(localStorage).filter(k => k.startsWith("ovp1:"));
+    ks.sort((a, b) => (JSON.parse(localStorage.getItem(a)).t || 0) - (JSON.parse(localStorage.getItem(b)).t || 0));
+    ks.slice(0, Math.ceil(ks.length / 2)).forEach(k => localStorage.removeItem(k));
+  } catch (e) {}
+}
+
+// Na het openen van een bestemming alvast de populairste categorieën ophalen (één tegelijk).
+export async function prefetch(dest, cats) {
+  for (const c of cats) {
+    if (cachedSearch(dest, c)) continue;
+    try { await overpassSearch(dest, c); } catch (e) {}
+    await new Promise(r => setTimeout(r, 400));
   }
-  const area = areaFilter(dest);
-  const body = `[out:json][timeout:30];(${parts.map(p => p + area + ";").join("")});out center tags 400;`;
-  let lastErr;
-  for (const ep of OVERPASS) {
-    try {
-      const res = await getJSON(ep, { method: "POST", body: "data=" + encodeURIComponent(body), headers: { "Content-Type": "application/x-www-form-urlencoded" } }, 40000);
-      return normalizeOSM(res.elements || [], dest, catKey);
-    } catch (e) { lastErr = e; }
-  }
-  throw lastErr || new Error("Overpass niet bereikbaar");
 }
 
 function dist(a, b, c, d) {
@@ -158,6 +202,7 @@ export async function wikiSummary({ wikidata, wikipedia, title, lang = "nl" }) {
   const key = wikidata || wikipedia || title;
   if (!key) return null;
   if (wikiCache.has(key)) return wikiCache.get(key);
+  try { const c = JSON.parse(localStorage.getItem("wiki1:" + key) || "null"); if (c) { wikiCache.set(key, Promise.resolve(c.v)); return c.v; } } catch (e) {}
   const p = (async () => {
     let pick = null;
     if (wikidata) {
@@ -174,7 +219,9 @@ export async function wikiSummary({ wikidata, wikipedia, title, lang = "nl" }) {
     try {
       const s = await getJSON(`https://${pick[0]}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(pick[1].replace(/ /g, "_"))}`, {}, 12000);
       if (s.type === "disambiguation") return null;
-      return { extract: s.extract, image: s.thumbnail && s.thumbnail.source, url: s.content_urls && s.content_urls.mobile && s.content_urls.mobile.page, lang: pick[0] };
+      const v = { extract: s.extract, image: s.thumbnail && s.thumbnail.source, url: s.content_urls && s.content_urls.mobile && s.content_urls.mobile.page, lang: pick[0] };
+      try { localStorage.setItem("wiki1:" + key, JSON.stringify({ v })); } catch (e) {}
+      return v;
     } catch (e) { return null; }
   })();
   wikiCache.set(key, p);
