@@ -64,7 +64,7 @@ De sleutel wordt alleen op je eigen apparaat bewaard en staat niet in deze repo.
 
 ## Techniek
 
-Gewone HTML, CSS en JavaScript, zonder build-stap. De Android-app is dezelfde code, verpakt met [Capacitor](https://capacitorjs.com) door `.github/workflows/android.yml`. Kaarten met [Leaflet](https://leafletjs.com) en OpenStreetMap-tegels. De app werkt ook offline: je to-do's en planning blijven zichtbaar, alleen zoeken heeft internet nodig. Zoekresultaten worden 3 dagen bewaard en populaire categorieën worden alvast op de achtergrond opgehaald, zodat wisselen tussen categorieën direct gaat.
+Gewone HTML, CSS en JavaScript, zonder build-stap. De Android-app is dezelfde code, verpakt met [Capacitor](https://capacitorjs.com) door `.github/workflows/android.yml`. Kaarten met [Leaflet](https://leafletjs.com) en OpenStreetMap-tegels. De app werkt ook offline: je to-do's en planning blijven zichtbaar, alleen zoeken heeft internet nodig. Snelheid: één verzoek haalt alle categorieën tegelijk op (standaard binnen 2 km). Dat begint al op de achtergrond terwijl je de bestemming typt. Vier kaartservers worden tegelijk gevraagd en de snelste wint. Resultaten worden 3 dagen bewaard. Wisselen tussen categorieën, filters (halal, nu open, zoeken op naam) en sorteren gebeurt daarna direct op je telefoon, zonder te wachten.
 
 ```
 index.html            app-pagina
