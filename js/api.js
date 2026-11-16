@@ -2,6 +2,7 @@
 
 const OVERPASS = [
   "https://overpass-api.de/api/interpreter",
+  "https://overpass.private.coffee/api/interpreter",
   "https://overpass.kumi.systems/api/interpreter",
   "https://maps.mail.ru/osm/tools/overpass/api/interpreter"
 ];
@@ -32,6 +33,18 @@ export async function geocode(q, near) {
   }));
 }
 
+// Snelle suggesties tijdens het typen (Photon, gemaakt voor autocomplete).
+export async function suggestPlaces(q, signal) {
+  const r = await getJSON("https://photon.komoot.io/api/?limit=6&q=" + encodeURIComponent(q), { signal }, 8000);
+  const seen = new Set();
+  return (r.features || []).map(f => {
+    const p = f.properties || {}, c = f.geometry.coordinates;
+    const e = p.extent; // [minLon, maxLat, maxLon, minLat]
+    const label = [...new Set([p.name, p.city, p.county, p.state, p.country].filter(Boolean))].join(", ");
+    return { name: p.name || label.split(",")[0], label, country: p.country || "", lat: c[1], lon: c[0], bbox: e ? [e[3], e[1], e[0], e[2]] : null, type: p.osm_value };
+  }).filter(g => g.name && !seen.has(g.label) && seen.add(g.label));
+}
+
 /* ---------- Categorieën ---------- */
 export const CATS = [
   { k: "sights", l: "Bezienswaardigheden", e: "🏛️", g: "top tourist attractions" },
@@ -60,75 +73,69 @@ const Q = {
   nightlife: ['nwr["amenity"~"^(bar|pub|nightclub)$"]["name"]', 'nwr["tourism"="viewpoint"]["name"]']
 };
 
-// Zoekstraal per categorie: klein genoeg om snel te zijn, groot genoeg voor genoeg keus.
-const RADIUS = { restaurants: 2500, cafes: 2500, nightlife: 4000, markets: 5000, malls: 9000, outlets: 25000, nature: 12000, activities: 12000, sights: 6000, museums: 6000 };
-export const autoRadius = (catKey, halal) => (RADIUS[catKey] || 6000) * (halal ? 2.4 : 1);
-function areaFilter(dest, catKey, halal) {
-  if (dest.fixedRadius) return `(around:${Math.round(dest.fixedRadius)},${dest.lat},${dest.lon})`;
-  let r = RADIUS[catKey] || 6000;
-  if (halal) r *= 2.4; // minder treffers, dus breder zoeken
-  const b = dest.bbox;
-  if (b) { // kleine plek (dorp, wijk): niet verder zoeken dan nodig
-    const half = dist(b[0], b[2], b[1], b[3]) * 500;
-    if (half > 600) r = Math.min(r, Math.max(half, 1500));
-  }
-  return `(around:${Math.round(r)},${dest.lat},${dest.lon})`;
-}
+const DUTCH_CUISINE = { turks: "turkish", italiaans: "italian", libanees: "lebanese", marokkaans: "moroccan", indiaas: "indian", chinees: "chinese", japans: "japanese", grieks: "greek", spaans: "spanish", mexicaans: "mexican", thais: "thai", arabisch: "arab", pakistaans: "pakistani", vis: "seafood", burger: "burger", pizza: "pizza", sushi: "sushi", kebab: "kebab", ontbijt: "breakfast", vegetarisch: "vegetarian", steak: "steak", koreaans: "korean", perzisch: "persian", indonesisch: "indonesian", surinaams: "surinamese", frans: "french", ijs: "ice_cream", koffie: "coffee", gebak: "cake", dessert: "dessert" };
 
-const DUTCH_CUISINE = { turks: "turkish", italiaans: "italian", libanees: "lebanese", marokkaans: "moroccan", indiaas: "indian", chinees: "chinese", japans: "japanese", grieks: "greek", spaans: "spanish", mexicaans: "mexican", thais: "thai", arabisch: "arab", pakistaans: "pakistani", vis: "seafood", burger: "burger", pizza: "pizza", sushi: "sushi", kebab: "kebab", ontbijt: "breakfast", vegetarisch: "vegetarian", steak: "steak", koreaans: "korean", perzisch: "persian", indonesisch: "indonesian", surinaams: "surinamese", frans: "french" };
-
+/* ---------- Alles in één keer ophalen (Overpass) ----------
+   Eén verzoek haalt alle categorieën tegelijk op. "out count" scheidt de categorieën in het antwoord. */
+export const DEFAULT_RADIUS = 2000;
+const LIMIT = { restaurants: 300, cafes: 200 };
 const CACHE_MS = 3 * 24 * 3600 * 1000;
-const inflight = new Map();
-const cacheKey = (dest, catKey, halal) => `ovp1:${dest.lat.toFixed(3)},${dest.lon.toFixed(3)}:${catKey}:${halal ? 1 : 0}:${dest.fixedRadius || "a"}`;
+const mem = new Map();
+const keyOf = w => `ovp2:${w.lat.toFixed(4)},${w.lon.toFixed(4)}:${Math.round(w.radius)}`;
 
-export function cachedSearch(dest, catKey, { halal = false } = {}) {
+export function cachedAll(w) {
+  const k = keyOf(w);
+  if (mem.has(k) && !(mem.get(k) instanceof Promise)) return mem.get(k);
   try {
-    const j = JSON.parse(localStorage.getItem(cacheKey(dest, catKey, halal && catOf(catKey).food)) || "null");
-    if (j && Date.now() - j.t < CACHE_MS) return j.v;
+    const j = JSON.parse(localStorage.getItem(k) || "null");
+    if (j && Date.now() - j.t < CACHE_MS) { mem.set(k, j.v); return j.v; }
   } catch (e) {}
   return null;
 }
 
-export async function overpassSearch(dest, catKey, { halal = false, fresh = false } = {}) {
-  halal = halal && catOf(catKey).food;
-  const key = cacheKey(dest, catKey, halal);
-  if (!fresh) { const c = cachedSearch(dest, catKey, { halal }); if (c) return c; }
-  if (inflight.has(key)) return inflight.get(key);
-  let parts = Q[catKey] || Q.sights;
-  if (halal) parts = parts.flatMap(p => [p + '["diet:halal"~"^(yes|only)$"]', p + '["name"~"halal",i]', p + '["cuisine"~"halal",i]']);
-  const area = areaFilter(dest, catKey, halal);
-  const body = "data=" + encodeURIComponent(`[out:json][timeout:20];(${parts.map(p => p + area + ";").join("")});out center tags qt 250;`);
-  // Alle servers tegelijk proberen: de snelste wint, de rest wordt afgebroken.
+// w = { lat, lon, radius }  →  { sights: [...], restaurants: [...], ... }
+export function fetchAll(w, { fresh = false } = {}) {
+  const k = keyOf(w);
+  if (!fresh) {
+    const c = cachedAll(w); if (c) return Promise.resolve(c);
+    if (mem.get(k) instanceof Promise) return mem.get(k);
+  }
+  const area = `(around:${Math.round(w.radius)},${w.lat},${w.lon})`;
+  const sets = CATS.map((c, i) => `(${Q[c.k].map(q => q + area + ";").join("")})->.s${i};.s${i} out count;.s${i} out center tags qt ${LIMIT[c.k] || 150};`).join("");
+  const halal = `(${['nwr["amenity"~"^(restaurant|fast_food|cafe)$"]["diet:halal"~"^(yes|only)$"]', 'nwr["amenity"~"^(restaurant|fast_food|cafe)$"]["name"~"halal",i]'].map(q => q + area + ";").join("")})->.h;.h out count;.h out center tags qt 150;`;
+  const body = "data=" + encodeURIComponent(`[out:json][timeout:25];${sets}${halal}`);
   const ctrls = OVERPASS.map(() => new AbortController());
-  const p = Promise.any(OVERPASS.map((ep, i) => getJSON(ep, { method: "POST", body, signal: ctrls[i].signal, headers: { "Content-Type": "application/x-www-form-urlencoded" } }, 25000)
-    .then(res => { if (!res || !res.elements) throw new Error("leeg"); return [i, res]; })))
+  const p = Promise.any(OVERPASS.map((ep, i) => getJSON(ep, { method: "POST", body, signal: ctrls[i].signal, headers: { "Content-Type": "application/x-www-form-urlencoded" } }, 30000)
+    .then(res => { if (!res || !res.elements || !res.elements.some(e => e.type === "count")) throw new Error("leeg"); return [i, res]; })))
     .then(([win, res]) => {
       ctrls.forEach((c, i) => i !== win && c.abort());
-      const v = normalizeOSM(res.elements, dest, catKey).slice(0, 120);
-      try { localStorage.setItem(key, JSON.stringify({ t: Date.now(), v })); } catch (e) { pruneCache(); }
-      return v;
+      const groups = []; let cur = null;
+      for (const el of res.elements) { if (el.type === "count") { cur = []; groups.push(cur); } else if (cur) cur.push(el); }
+      const out = {};
+      CATS.forEach((c, i) => { out[c.k] = normalizeOSM(groups[i] || [], w, c.k); });
+      // halal-plekken die buiten de limiet vielen alsnog toevoegen
+      const h = groups[CATS.length] || [];
+      for (const [cat, re] of [["restaurants", /restaurant|fast_food/], ["cafes", /cafe/]]) {
+        const extra = normalizeOSM(h.filter(e => re.test((e.tags || {}).amenity || "")), w, cat);
+        const have = new Set(out[cat].map(p => p._id));
+        out[cat] = out[cat].concat(extra.filter(p => !have.has(p._id))).sort((a, b) => b.score - a.score);
+      }
+      for (const kk in out) out[kk] = out[kk].slice(0, 200);
+      mem.set(k, out);
+      try { localStorage.setItem(k, JSON.stringify({ t: Date.now(), v: out })); } catch (e) { pruneCache(); try { localStorage.setItem(k, JSON.stringify({ t: Date.now(), v: out })); } catch (e2) {} }
+      return out;
     })
-    .catch(() => { throw new Error("Overpass niet bereikbaar"); })
-    .finally(() => inflight.delete(key));
-  inflight.set(key, p);
+    .catch(e => { mem.delete(k); throw new Error("Kaartdienst niet bereikbaar"); });
+  mem.set(k, p);
   return p;
 }
 
 function pruneCache() {
   try {
-    const ks = Object.keys(localStorage).filter(k => k.startsWith("ovp1:"));
-    ks.sort((a, b) => (JSON.parse(localStorage.getItem(a)).t || 0) - (JSON.parse(localStorage.getItem(b)).t || 0));
-    ks.slice(0, Math.ceil(ks.length / 2)).forEach(k => localStorage.removeItem(k));
+    const ks = Object.keys(localStorage).filter(k => k.startsWith("ovp"));
+    const t = k => { try { return JSON.parse(localStorage.getItem(k)).t || 0; } catch (e) { return 0; } };
+    ks.sort((a, b) => t(a) - t(b)).slice(0, Math.ceil(ks.length / 2)).forEach(k => localStorage.removeItem(k));
   } catch (e) {}
-}
-
-// Na het openen van een bestemming alvast de populairste categorieën ophalen (één tegelijk).
-export async function prefetch(dest, cats) {
-  for (const c of cats) {
-    if (cachedSearch(dest, c)) continue;
-    try { await overpassSearch(dest, c); } catch (e) {}
-    await new Promise(r => setTimeout(r, 400));
-  }
 }
 
 function dist(a, b, c, d) {
@@ -186,7 +193,7 @@ function normalizeOSM(els, dest, cat) {
       kind: t.tourism || t.historic || t.amenity || t.shop || t.leisure || t.natural || "",
       wheelchair: t.wheelchair || null,
       fee: t.fee || null,
-      tagText: Object.entries(t).map(([k, v]) => k + "=" + v).join(" ").toLowerCase(),
+      tx: [t.name, t["name:en"], t.cuisine, t.amenity, t.shop, t.tourism, t.brand, t.historic, t.leisure, t.natural, t["diet:vegetarian"] === "yes" || t["diet:vegetarian"] === "only" ? "vegetarian" : ""].filter(Boolean).join(" ").toLowerCase(),
       score
     });
   }
@@ -196,7 +203,7 @@ function normalizeOSM(els, dest, cat) {
 export function filterByText(list, q) {
   if (!q) return list;
   const words = q.toLowerCase().split(/\s+/).filter(Boolean).map(w => DUTCH_CUISINE[w] || w);
-  return list.filter(p => words.every(w => p.tagText.includes(w) || p.name.toLowerCase().includes(w)));
+  return list.filter(p => words.every(w => (p.tx || "").includes(w) || p.name.toLowerCase().includes(w)));
 }
 
 /* ---------- Wikipedia / Wikidata ---------- */
@@ -310,4 +317,44 @@ export async function googleReviews(key, gId) {
     alcohol: (p.servesBeer || p.servesWine) ? "Schenkt alcohol" : (p.servesBeer === false && p.servesWine === false ? "Schenkt geen alcohol" : null),
     reservable: p.reservable, phone: p.nationalPhoneNumber || null
   };
+}
+
+/* ---------- Nu open? (eenvoudige lezer voor OSM opening_hours) ----------
+   Geeft true / false terug, of null als de tijden te ingewikkeld zijn. */
+const DAYS = ["Su", "Mo", "Tu", "We", "Th", "Fr", "Sa"];
+export function isOpenNow(oh, now = new Date()) {
+  if (!oh) return null;
+  oh = oh.trim();
+  if (oh === "24/7") return true;
+  if (/PH|SH|week|easter|sunrise|sunset|\[|"|\b(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\b/.test(oh)) return null;
+  const today = now.getDay(), mins = now.getHours() * 60 + now.getMinutes();
+  const dayIn = (spec, d) => spec.split(",").some(part => {
+    const m = part.trim().match(/^(Mo|Tu|We|Th|Fr|Sa|Su)(?:-(Mo|Tu|We|Th|Fr|Sa|Su))?$/);
+    if (!m) throw 0;
+    const a = DAYS.indexOf(m[1]), b = m[2] ? DAYS.indexOf(m[2]) : a;
+    return a <= b ? d >= a && d <= b : d >= a || d <= b;
+  });
+  const toMin = t => { const [h, m] = t.split(":").map(Number); return h * 60 + m; };
+  try {
+    let open = false, decided = false;
+    for (const rule of oh.split(";").map(r => r.trim()).filter(Boolean)) {
+      const m = rule.match(/^((?:(?:Mo|Tu|We|Th|Fr|Sa|Su)(?:-(?:Mo|Tu|We|Th|Fr|Sa|Su))?,?)+)?\s*(.*)$/);
+      const days = m[1], times = m[2].trim();
+      // vandaag, of gisteren voor tijden over middernacht
+      for (const [d, shift] of [[today, 0], [(today + 6) % 7, 1440]]) {
+        if (days && !dayIn(days, d)) continue;
+        if (!days && shift) continue;
+        if (/^off|closed$/i.test(times)) { if (!shift) { open = false; decided = true; } continue; }
+        for (const rng of times.split(",")) {
+          const t = rng.trim().match(/^(\d{1,2}:\d{2})-(\d{1,2}:\d{2})\+?$/);
+          if (!t) throw 0;
+          let a = toMin(t[1]), b = toMin(t[2]); if (b <= a) b += 1440;
+          const cur = mins + shift;
+          if (!shift) decided = true;
+          if (cur >= a && cur < b) { open = true; decided = true; }
+        }
+      }
+    }
+    return decided ? open : false;
+  } catch (e) { return null; }
 }
