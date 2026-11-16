@@ -18,8 +18,9 @@ async function getJSON(url, opts = {}, ms = 30000) {
 }
 
 /* ---------- Bestemming zoeken (Nominatim) ---------- */
-export async function geocode(q) {
-  const url = "https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&accept-language=nl&q=" + encodeURIComponent(q);
+export async function geocode(q, near) {
+  let url = "https://nominatim.openstreetmap.org/search?format=jsonv2&addressdetails=1&limit=6&accept-language=nl&q=" + encodeURIComponent(q);
+  if (near) { const d = 0.6; url += `&viewbox=${near.lon - d},${near.lat + d},${near.lon + d},${near.lat - d}`; }
   const res = await getJSON(url, { headers: { "Accept": "application/json" } }, 15000);
   return res.map(r => ({
     name: r.name || r.display_name.split(",")[0],
@@ -61,7 +62,9 @@ const Q = {
 
 // Zoekstraal per categorie: klein genoeg om snel te zijn, groot genoeg voor genoeg keus.
 const RADIUS = { restaurants: 2500, cafes: 2500, nightlife: 4000, markets: 5000, malls: 9000, outlets: 25000, nature: 12000, activities: 12000, sights: 6000, museums: 6000 };
+export const autoRadius = (catKey, halal) => (RADIUS[catKey] || 6000) * (halal ? 2.4 : 1);
 function areaFilter(dest, catKey, halal) {
+  if (dest.fixedRadius) return `(around:${Math.round(dest.fixedRadius)},${dest.lat},${dest.lon})`;
   let r = RADIUS[catKey] || 6000;
   if (halal) r *= 2.4; // minder treffers, dus breder zoeken
   const b = dest.bbox;
@@ -76,7 +79,7 @@ const DUTCH_CUISINE = { turks: "turkish", italiaans: "italian", libanees: "leban
 
 const CACHE_MS = 3 * 24 * 3600 * 1000;
 const inflight = new Map();
-const cacheKey = (dest, catKey, halal) => `ovp1:${dest.lat.toFixed(3)},${dest.lon.toFixed(3)}:${catKey}:${halal ? 1 : 0}`;
+const cacheKey = (dest, catKey, halal) => `ovp1:${dest.lat.toFixed(3)},${dest.lon.toFixed(3)}:${catKey}:${halal ? 1 : 0}:${dest.fixedRadius || "a"}`;
 
 export function cachedSearch(dest, catKey, { halal = false } = {}) {
   try {
@@ -268,10 +271,10 @@ export async function googleSearch(key, dest, catKey, { halal = false, query = "
     fields: ["id", "displayName", "formattedAddress", "location", "rating", "userRatingCount", "priceLevel", "photos", "googleMapsURI", "editorialSummary", "regularOpeningHours", "websiteURI", "primaryTypeDisplayName"],
     language: "nl",
     maxResultCount: 20,
-    locationBias: { lat: dest.lat, lng: dest.lon }
+    locationBias: dest.fixedRadius ? { center: { lat: dest.lat, lng: dest.lon }, radius: Math.min(dest.fixedRadius, 50000) } : { lat: dest.lat, lng: dest.lon }
   };
   const { places } = await Place.searchByText(req);
-  return (places || []).map(p => {
+  return (places || []).filter(p => !dest.fixedRadius || !p.location || dist(dest.lat, dest.lon, p.location.lat(), p.location.lng()) * 1000 <= dest.fixedRadius * 1.15).map(p => {
     gPlaces.set(p.id, p);
     let photo = null;
     try { photo = p.photos && p.photos[0] ? p.photos[0].getURI({ maxWidth: 800 }) : null; } catch (e) {}
